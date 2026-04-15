@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import OpenAI from 'openai';
+import { fetchRecipesForProfile, formatRecipesForPrompt } from './spoonacular.js';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -11,7 +12,7 @@ app.use(express.json());
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-function buildSystemPrompt(profile) {
+function buildSystemPrompt(profile, recipes = []) {
   const { age, height, weight, goal, budget } = profile;
 
   const goalDescriptions = {
@@ -22,6 +23,7 @@ function buildSystemPrompt(profile) {
   };
 
   const goalText = goalDescriptions[goal] || goal;
+  const recipeContext = formatRecipesForPrompt(recipes);
 
   return `You are a professional nutritionist and meal prep coach. Here is the user's profile:
 - Age: ${age} years old
@@ -33,10 +35,10 @@ function buildSystemPrompt(profile) {
 Your job is to create detailed, practical weekly meal prep plans tailored to this profile. When the user asks for a meal plan, provide:
 1. A weekly overview (7 days, 3 meals + optional snacks per day)
 2. Key recipes with brief instructions
-3. Macro estimates (calories, protein, carbs, fat) per day
-4. A consolidated grocery/shopping list with estimated costs to stay within budget
+3. Macro estimates (calories, protein, carbs, fat) per day — use the real data provided below where available
+4. A consolidated grocery/shopping list with estimated costs to stay within the $${budget}/week budget — use the real price-per-serving data provided below
 
-Keep your tone friendly, motivating, and practical. If the user asks follow-up questions about substitutions, allergies, or adjustments, answer helpfully based on their profile. Always stay within their stated budget.`;
+Keep your tone friendly, motivating, and practical. If the user asks follow-up questions about substitutions, allergies, or adjustments, answer helpfully based on their profile. Always stay within their stated budget.${recipeContext}`;
 }
 
 app.post('/api/chat', async (req, res) => {
@@ -49,7 +51,19 @@ app.post('/api/chat', async (req, res) => {
     return res.status(400).json({ error: 'profile is required' });
   }
 
-  const systemPrompt = buildSystemPrompt(profile);
+  // Only fetch recipes on the first user message to avoid redundant API calls
+  const isFirstMessage = messages.length === 1;
+  let recipes = [];
+  if (isFirstMessage) {
+    try {
+      recipes = await fetchRecipesForProfile(profile);
+      console.log(`Fetched ${recipes.length} recipes from Spoonacular`);
+    } catch (err) {
+      console.warn('Spoonacular fetch failed, continuing without recipes:', err.message);
+    }
+  }
+
+  const systemPrompt = buildSystemPrompt(profile, recipes);
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
